@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Read(//Users/leonid/Projects/Megapolis-IT/**)",
+      "Bash(git checkout *)",
+      "Bash(kill *)",
+      "Bash(ls *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git submodule *)",
+      "Bash(git push *)",
+      "Bash(git init)",
+      "Bash(git remote *)",
+      "Bash(git rm *)"
+    ]
+  },
+  "$version": 4
+}
