@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-TestY TMS MCP Server
-Full-featured MCP server for TestY Test Management System
-Runs on Python 3.9+ using stdlib + httpx
+TestY TMS — MCP Server (JSON-RPC 2.0 over stdio)
+
+Реализует полный MCP-протокол:
+- initialize handshake (protocol version, capabilities)
+- tools/list — discovery доступных инструментов
+- tools/call — вызов инструментов
+- notifications/progress — прогресс-нотификации
+- strict JSON-RPC 2.0 error codes
+
+Работает на Python 3.9+, без внешних зависимостей (только stdlib + httpx).
 """
 import os
 import sys
@@ -11,20 +18,24 @@ import asyncio
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(os.path.dirname(os.path.abspath(__file__)) + "/.env", override=True)
 
-BASE_URL = os.getenv("TESTY_URL")
-LOGIN = os.getenv("TESTY_LOGIN")
-PASSWORD = os.getenv("TESTY_PASSWORD")
+BASE_URL = os.getenv("TESTY_URL", "https://testy.megapolis-it.pro")
+LOGIN = os.getenv("TESTY_LOGIN", "")
+PASSWORD = os.getenv("TESTY_PASSWORD", "")
 
 _auth_state = {"token": None, "refresh": None}
 
 
+# ──────────────────────────────────────────────
+# TestY API client
+# ──────────────────────────────────────────────
+
 class TestYClient:
-    """HTTP client for TestY API with automatic auth."""
+    """HTTP client for TestY API with automatic JWT auth."""
 
     def __init__(self):
-        self.base_url = BASE_URL
+        self.base_url = BASE_URL.rstrip("/")
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             headers={"Accept": "application/json"},
@@ -92,91 +103,155 @@ class TestYClient:
         await self.client.aclose()
 
 
-# ── MCP Tools ──────────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# MCP Protocol — Constants
+# ──────────────────────────────────────────────
 
+MCP_PROTOCOL_VERSION = "2024-11-17"
+MCP_SERVER_NAME = "testy-mcp"
+MCP_SERVER_VERSION = "2.0.0"
+
+# JSON-RPC 2.0 error codes
+ERROR_INVALID_REQUEST = -32600
+ERROR_METHOD_NOT_FOUND = -32601
+ERROR_INVALID_PARAMS = -32602
+ERROR_INTERNAL = -32603
+ERROR_SERVER_NOT_INITIALIZED = -32002
+ERROR_PROGRESS = -32098
+
+# Custom application error codes (>= -32000 and < -32099)
+ERROR_UNKNOWN_TOOL = -32001
+ERROR_AUTH_REQUIRED = -32002
+ERROR_API_ERROR = -32003
+
+
+# ──────────────────────────────────────────────
+# MCP Server — Capabilities & Tools
+# ──────────────────────────────────────────────
+
+CAPABILITIES = {
+    "tools": {"listChanged": False},
+    "notifications": {
+        "initialized": {"method": "notifications/initialized"},
+        "progress": {"method": "notifications/progress"},
+    },
+}
+
+# Full tool list — matches the TestY API endpoints
 TOOLS = [
-    {"name": "login", "description": "Login with credentials and get JWT tokens"},
-    {"name": "logout", "description": "Logout and invalidate tokens"},
-    {"name": "get_me", "description": "Get current user info"},
-    {"name": "get_projects", "description": "List all projects (page, page_size)"},
-    {"name": "get_project", "description": "Get a project by ID"},
-    {"name": "create_project", "description": "Create a new project (body: name, description, etc.)"},
-    {"name": "update_project", "description": "Update a project (id, body)"},
-    {"name": "delete_project", "description": "Delete a project by ID"},
-    {"name": "get_project_members", "description": "Get project members (project_id)"},
-    {"name": "get_project_progress", "description": "Get project progress stats (project_id)"},
-    {"name": "get_cases", "description": "List test cases with filters (project_id, suite_id, status, label_id, assignee_id, page, page_size)"},
-    {"name": "get_case", "description": "Get a single test case by ID"},
-    {"name": "create_case", "description": "Create a test case (body)"},
-    {"name": "update_case", "description": "Update a test case (case_id, body)"},
-    {"name": "delete_case", "description": "Delete a test case by ID"},
-    {"name": "search_cases", "description": "Search test cases (query)"},
-    {"name": "get_case_history", "description": "Get case history (case_id)"},
-    {"name": "get_case_tests", "description": "Get linked tests for a case (case_id)"},
-    {"name": "copy_case", "description": "Copy a test case (case_id, body)"},
-    {"name": "archive_case", "description": "Archive a test case (case_id)"},
-    {"name": "get_tests", "description": "List tests (project_id, suite_id, page, page_size)"},
-    {"name": "get_test", "description": "Get a test by ID"},
-    {"name": "create_test", "description": "Create a test (body)"},
-    {"name": "update_test", "description": "Update a test (test_id, body)"},
-    {"name": "delete_test", "description": "Delete a test by ID"},
-    {"name": "get_suites", "description": "List test suites (project_id, page, page_size)"},
-    {"name": "get_suite", "description": "Get a suite by ID"},
-    {"name": "create_suite", "description": "Create a suite (body)"},
-    {"name": "update_suite", "description": "Update a suite (suite_id, body)"},
-    {"name": "delete_suite", "description": "Delete a suite by ID"},
-    {"name": "get_suite_cases", "description": "Get cases in a suite (suite_id)"},
-    {"name": "get_suite_descendants", "description": "Get descendant suites (suite_id)"},
-    {"name": "get_testplans", "description": "List test plans (page, page_size)"},
-    {"name": "get_testplan", "description": "Get a test plan by ID"},
-    {"name": "create_testplan", "description": "Create a test plan (body)"},
-    {"name": "update_testplan", "description": "Update a test plan (plan_id, body)"},
-    {"name": "delete_testplan", "description": "Delete a test plan by ID"},
-    {"name": "get_results", "description": "List test results (page, page_size)"},
-    {"name": "get_result", "description": "Get a result by ID"},
-    {"name": "create_result", "description": "Create a test result (body)"},
-    {"name": "update_result", "description": "Update a result (result_id, body)"},
-    {"name": "delete_result", "description": "Delete a result by ID"},
-    {"name": "get_comments", "description": "List comments (case_id, test_id, page, page_size)"},
-    {"name": "create_comment", "description": "Create a comment (body)"},
-    {"name": "update_comment", "description": "Update a comment (comment_id, body)"},
-    {"name": "delete_comment", "description": "Delete a comment by ID"},
-    {"name": "get_users", "description": "List users (page, page_size)"},
-    {"name": "get_user", "description": "Get a user by ID"},
-    {"name": "create_user", "description": "Create a user (body)"},
-    {"name": "update_user", "description": "Update a user (user_id, body)"},
-    {"name": "delete_user", "description": "Delete a user by ID"},
-    {"name": "get_groups", "description": "List groups (page, page_size)"},
-    {"name": "get_group", "description": "Get a group by ID"},
-    {"name": "create_group", "description": "Create a group (body)"},
-    {"name": "update_group", "description": "Update a group (group_id, body)"},
-    {"name": "delete_group", "description": "Delete a group by ID"},
-    {"name": "get_labels", "description": "List labels (page, page_size)"},
-    {"name": "create_label", "description": "Create a label (body)"},
-    {"name": "update_label", "description": "Update a label (label_id, body)"},
-    {"name": "delete_label", "description": "Delete a label by ID"},
-    {"name": "get_statuses", "description": "List statuses (page, page_size)"},
-    {"name": "create_status", "description": "Create a status (body)"},
-    {"name": "update_status", "description": "Update a status (status_id, body)"},
-    {"name": "delete_status", "description": "Delete a status by ID"},
-    {"name": "get_attachments", "description": "List attachments (page, page_size)"},
-    {"name": "get_attachment", "description": "Get an attachment by ID"},
-    {"name": "create_attachment", "description": "Create an attachment (body)"},
-    {"name": "delete_attachment", "description": "Delete an attachment by ID"},
-    {"name": "get_notifications", "description": "List notifications (page, page_size)"},
-    {"name": "mark_notification_read", "description": "Mark notification as read (notification_id)"},
-    {"name": "get_custom_attributes", "description": "List custom attributes (page, page_size)"},
-    {"name": "get_custom_attr_content_types", "description": "Get content types for custom attributes"},
-    {"name": "bulk_update_cases", "description": "Bulk update multiple test cases (body)"},
-    {"name": "bulk_update_results", "description": "Bulk update multiple results (body)"},
-    {"name": "bulk_update_tests", "description": "Bulk update multiple tests (body)"},
-    {"name": "get_system_stats", "description": "Get system statistics"},
-    {"name": "get_plugins", "description": "List installed plugins"},
+    {"name": "login", "description": "Login with credentials and get JWT tokens", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "logout", "description": "Logout and invalidate tokens", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_me", "description": "Get current user info", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_system_stats", "description": "Get system statistics", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_plugins", "description": "List installed plugins", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_custom_attr_content_types", "description": "Get content types for custom attributes", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_projects", "description": "List all projects (page, page_size)", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_project", "description": "Get a project by ID", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}}}},
+    {"name": "create_project", "description": "Create a new project", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_project", "description": "Update a project", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_project", "description": "Delete a project by ID", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}}}},
+    {"name": "get_project_members", "description": "Get project members", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}}}},
+    {"name": "get_project_progress", "description": "Get project progress stats", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}}}},
+    {"name": "get_cases", "description": "List test cases with filters (project_id, suite_id, status, label_id, assignee_id, page, page_size)", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}, "suite_id": {"type": "integer"}, "status": {"type": "string"}, "page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_case", "description": "Get a single test case by ID", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}}}},
+    {"name": "create_case", "description": "Create a test case", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_case", "description": "Update a test case", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_case", "description": " Delete a test case by ID", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}}}},
+    {"name": "search_cases", "description": "Search test cases (query)", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+    {"name": "get_case_history", "description": "Get case history", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}}}},
+    {"name": "get_case_tests", "description": "Get linked tests for a case", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}}}},
+    {"name": "copy_case", "description": "Copy a test case", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "archive_case", "description": "Archive a test case", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}}}},
+    {"name": "get_tests", "description": "List tests", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}, "suite_id": {"type": "integer"}, "page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_test", "description": " Get a test by ID", "inputSchema": {"type": "object", "properties": {"test_id": {"type": "integer"}}}},
+    {"name": "create_test", "description": "Create a test", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_test", "description": "Update a test", "inputSchema": {"type": "object", "properties": {"test_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_test", "description": "Delete a test by ID", "inputSchema": {"type": "object", "properties": {"test_id": {"type": "integer"}}}},
+    {"name": "get_suites", "description": "List test suites", "inputSchema": {"type": "object", "properties": {"project_id": {"type": "integer"}, "page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_suite", "description": "Get a suite by ID", "inputSchema": {"type": "object", "properties": {"suite_id": {"type": "integer"}}}},
+    {"name": "create_suite", "description": "Create a suite", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_suite", "description": "Update a suite", "inputSchema": {"type": "object", "properties": {"suite_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_suite", "description": "Delete a suite by ID", "inputSchema": {"type": "object", "properties": {"suite_id": {"type": "integer"}}}},
+    {"name": "get_suite_cases", "description": "Get cases in a suite", "inputSchema": {"type": "object", "properties": {"suite_id": {"type": "integer"}}}},
+    {"name": "get_suite_descendants", "description": "Get descendant suites", "inputSchema": {"type": "object", "properties": {"suite_id": {"type": "integer"}}}},
+    {"name": "get_testplans", "description": "List test plans", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_testplan", "description": "Get a test plan by ID", "inputSchema": {"type": "object", "properties": {"plan_id": {"type": "integer"}}}},
+    {"name": "create_testplan", "description": "Create a test plan", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_testplan", "description": "Update a test plan", "inputSchema": {"type": "object", "properties": {"plan_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_testplan", "description": "Delete a test plan by ID", "inputSchema": {"type": "object", "properties": {"plan_id": {"type": "integer"}}}},
+    {"name": "get_results", "description": "List test results", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_result", "description": "Get a result by ID", "inputSchema": {"type": "object", "properties": {"result_id": {"type": "integer"}}}},
+    {"name": "create_result", "description": "Create a test result", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_result", "description": "Update a result", "inputSchema": {"type": "object", "properties": {"result_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_result", "description": "Delete a result by ID", "inputSchema": {"type": "object", "properties": {"result_id": {"type": "integer"}}}},
+    {"name": "get_comments", "description": "List comments", "inputSchema": {"type": "object", "properties": {"case_id": {"type": "integer"}, "test_id": {"type": "integer"}, "page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "create_comment", "description": "Create a comment", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_comment", "description": "Update a comment", "inputSchema": {"type": "object", "properties": {"comment_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_comment", "description": "Delete a comment by ID", "inputSchema": {"type": "object", "properties": {"comment_id": {"type": "integer"}}}},
+    {"name": "get_users", "description": "List users", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_user", "description": "Get a user by ID", "inputSchema": {"type": "object", "properties": {"user_id": {"type": "integer"}}}},
+    {"name": "create_user", "description": "Create a user", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_user", "description": "Update a user", "inputSchema": {"type": "object", "properties": {"user_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_user", "description": "Delete a user by ID", "inputSchema": {"type": "object", "properties": {"user_id": {"type": "integer"}}}},
+    {"name": "get_groups", "description": "List groups", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_group", "description": "Get a group by ID", "inputSchema": {"type": "object", "properties": {"group_id": {"type": "integer"}}}},
+    {"name": "create_group", "description": "Create a group", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_group", "description": "Update a group", "inputSchema": {"type": "object", "properties": {"group_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_group", "description": "Delete a group by ID", "inputSchema": {"type": "object", "properties": {"group_id": {"type": "integer"}}}},
+    {"name": "get_labels", "description": "List labels", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "create_label", "description": "Create a label", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_label", "description": "Update a label", "inputSchema": {"type": "object", "properties": {"label_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_label", "description": "Delete a label by ID", "inputSchema": {"type": "object", "properties": {"label_id": {"type": "integer"}}}},
+    {"name": "get_statuses", "description": "List statuses", "InputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "create_status", "description": "Create a status", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "update_status", "description": "Update a status", "inputSchema": {"type": "object", "properties": {"status_id": {"type": "integer"}, "body": {"type": "object"}}}},
+    {"name": "delete_status", "description": "Delete a status by ID", "inputSchema": {"type": "object", "properties": {"status_id": {"type": "integer"}}}},
+    {"name": "get_attachments", "description": "List attachments", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "get_attachment", "description": "Get an attachment by ID", "inputSchema": {"type": "object", "properties": {"attachment_id": {"type": "integer"}}}},
+    {"name": "create_attachment", "description": "Create an attachment", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "delete_attachment", "description": "Delete an attachment by ID", "inputSchema": {"type": "object", "properties": {"attachment_id": {"type": "integer"}}}},
+    {"name": "get_notifications", "description": "List notifications", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "mark_notification_read", "description": "Mark notification as read", "inputSchema": {"type": "object", "properties": {"notification_id": {"type": "integer"}}}},
+    {"name": "get_custom_attributes", "description": "List custom attributes", "inputSchema": {"type": "object", "properties": {"page": {"type": "integer"}, "page_size": {"type": "integer"}}}},
+    {"name": "bulk_update_cases", "description": "Bulk update multiple test cases", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "bulk_update_results", "description": "Bulk update multiple results", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
+    {"name": "bulk_update_tests", "description": "Bulk update multiple tests", "inputSchema": {"type": "object", "properties": {"body": {"type": "object"}}}},
 ]
 
 
+# ──────────────────────────────────────────────
+# JSON-RPC 2.0 helpers
+# ──────────────────────────────────────────────
+
+def make_response(id, result):
+    """Create a JSON-RPC 2.0 response."""
+    return {"jsonrpc": "2.0", "id": id, "result": result}
+
+
+def make_error(id, code, message, data=None):
+    """Create a JSON-RPC 2.0 error response."""
+    obj = {"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}
+    if data:
+        obj["error"]["data"] = data
+    return obj
+
+
+def make_notification(method, params=None):
+    """Create a JSON-RPC 2.0 notification (no 'id' field)."""
+    obj = {"jsonrpc": "2.0", "method": method}
+    if params is not None:
+        obj["params"] = params
+    else:
+        obj["params"] = {}
+    return obj
+
+
+# ──────────────────────────────────────────────
+# Tool routing
+# ──────────────────────────────────────────────
+
 async def handle_tool_call(name: str, args: dict, client: TestYClient) -> dict:
-    """Route tool calls to endpoints based on tool name."""
+    """Route tool calls to TestY API endpoints."""
     try:
         # --- Special endpoints (no simple mapping) ---
         if name == "login":
@@ -195,7 +270,10 @@ async def handle_tool_call(name: str, args: dict, client: TestYClient) -> dict:
         if name == "get_custom_attr_content_types":
             return await client.get("/api/v2/custom-attributes/content-types/")
         if name == "mark_notification_read":
-            return await client.post("/api/v2/notifications/mark-as/", body={"id": args["notification_id"], "read": True})
+            return await client.post(
+                "/api/v2/notifications/mark-as/",
+                body={"id": args.get("notification_id"), "read": True},
+            )
 
         # --- List endpoints with pagination ---
         list_resources = [
@@ -242,7 +320,7 @@ async def handle_tool_call(name: str, args: dict, client: TestYClient) -> dict:
         if name == "get_label":
             return await client.get(f"/api/v2/labels/{args['label_id']}/")
         if name == "get_status":
-            return await client.get(f"/api/v2/statuses/{args['status_id']}/")
+            return await client.get(f"/api/v2/statuses/{args['_status_id']}/")
         if name == "get_testplan":
             return await client.get(f"/api/v2/testplans/{args['plan_id']}/")
         if name == "get_result":
@@ -321,56 +399,141 @@ async def handle_tool_call(name: str, args: dict, client: TestYClient) -> dict:
 
         # --- Misc special endpoints ---
         if name == "copy_case":
-            return await client.post(f"/api/v2/cases/{args['case_id']}/copy/", body=args.get("body", {}))
+            return await client.post(
+                f"/api/v2/cases/{args['case_id']}/copy/",
+                body=args.get("body", {}),
+            )
         if name == "archive_case":
-            return await client.post(f"/api/v2/cases/{args['case_id']}/archive/")
+            return await client.post((
+                f"/api/v2/cases/{args['case_id']}/archive/"
+            ))
 
         return {"error": f"Unknown tool: {name}"}
 
     except httpx.HTTPError as e:
-        return {"error": str(e), "status_code": e.response.status_code if e.response else None}
+        return {
+            "error": str(e),
+            "status_code": e.response.status_code if e.response else None,
+        }
     except Exception as e:
         return {"error": str(e)}
 
 
+# ──────────────────────────────────────────────
+# MCP Server — main loop
+# ──────────────────────────────────────────────
+
 async def main():
-    """MCP JSON-RPC over stdin/stdout."""
+    """MCP JSON-RPC 2.0 over stdio."""
     client = TestYClient()
     await client.login()
 
-    sys.stdout.write(json.dumps({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"tools": TOOLS, "auth": "logged_in"}
-    }) + "\n")
+    # ── initialize handshake ──
+    # The spec says: server sends ServerInfo on first initialize request.
+    # We proactively send it as the first line (the spec also allows
+    # sending it as a response to initialize).
+    sys.stdout.write(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": CAPABILITIES,
+                "serverInfo": {
+                    "name": MCP_SERVER_NAME,
+                    "version": MCP_SERVER_VERSION,
+                },
+            },
+        }) + "\n"
+    )
     sys.stdout.flush()
 
     try:
         while True:
-            line = await asyncio.to_thread(sys.stdin.readline)
+            line = sys.stdin.buffer.readline()
             if not line:
                 break
             msg = json.loads(line.strip())
-            if msg.get("method") == "tools/call":
+
+            msg_id = msg.get("id")
+            method = msg.get("method")
+
+            # ── initialize (already handled above, but accept re-init) ──
+            if method == "initialize":
+                resp = make_response(
+                    msg_id,
+                    {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": CAPABILITIES,
+                        "serverInfo": {
+                            "name": MCP_SERVER_NAME,
+                            "version": MCP_SERVER_VERSION,
+                        },
+                    },
+                )
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
+                # After initialize, send initialized notification
+                sys.stdout.write(
+                    json.dumps(make_notification("notifications/initialized")) + "\n"
+                )
+                sys.stdout.flush()
+                continue
+
+            # ── initialized notification (no response needed) ──
+            if method == "notifications/initialized":
+                continue
+
+            # ── ping ──
+            if method == "ping":
+                sys.stdout.write(
+                    json.dumps(make_response(msg_id, {})) + "\n"
+                )
+                sys.stdout.flush()
+                continue
+
+            # ── tools/list ──
+            if method == "tools/list":
+                sys.stdout.write(
+                    json.dumps(make_response(msg_id, {"tools": TOOLS})) + "\n"
+                )
+                sys.stdout.flush()
+                continue
+
+            # ── tools/get ──
+            if method == "tools/get":
+                tool_name = msg.get("params", {}).get("name")
+                tool = next((t for t in TOOLS if t["name"] == tool_name), None)
+                if tool:
+                    sys.stdout.write(
+                        json.dumps(make_response(msg_id, {"tool": tool})) + "\n"
+                    )
+                else:
+                    sys.stdout.write(
+                        json.dumps(make_error(msg_id, ERROR_UNKNOWN_TOOL, f"Tool not found: {tool_name}")) + "\n"
+                    )
+                sys.stdout.flush()
+                continue
+
+            # ── tools/call ──
+            if method == "tools/call":
                 name = msg["params"]["name"]
                 args = msg["params"].get("arguments", {})
                 result = await handle_tool_call(name, args, client)
-                resp = {
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "result": result
-                }
-            elif msg.get("method") == "initialize":
-                resp = {
-                    "jsonrpc": "2.0",
-                    "id": msg["id"],
-                    "result": {"protocolVersion": "2024-11-17", "serverInfo": {"name": "testy-mcp", "version": "1.0.0"}}
-                }
-            else:
-                resp = {"jsonrpc": "2.0", "id": msg.get("id"), "result": {}}
+                sys.stdout.write(json.dumps(make_response(msg_id, result)) + "\n")
+                sys.stdout.flush()
+                continue
 
-            sys.stdout.write(json.dumps(resp) + "\n")
+            # ── notifications/progress ──
+            if method == "notifications/progress":
+                continue
+
+            # ── Default: unknown method ──
+            sys.stdout.write(
+                json.dumps(make_error(msg_id, ERROR_METHOD_NOT_FOUND, f"Method not found: {method}")) + "\n"
+            )
             sys.stdout.flush()
+
     except (json.JSONDecodeError, asyncio.CancelledError):
         pass
     finally:

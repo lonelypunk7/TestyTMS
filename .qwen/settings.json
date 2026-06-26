@@ -12,7 +12,24 @@
       "Bash(git push *)",
       "Bash(git init)",
       "Bash(git remote *)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "Bash(pip3 show *)",
+      "Bash(pip3 list)",
+      "Bash(pip3 install *)",
+      "Bash(pip3 search *)",
+      "Bash(pip3 index *)",
+      "Bash(curl *)",
+      "Bash(.venv/bin/python3 *)",
+      "Bash(.venv/bin/pip *)",
+      "Bash(which *)",
+      "Bash(python3.11 *)",
+      "Bash(python3.12 *)",
+      "Bash(timeout *)",
+      "Bash(true)",
+      "Bash(wait)",
+      "Bash(sed *)",
+      "Bash(4#ba)",
+      "Bash(enveof)"
     ]
   },
   "$version": 4

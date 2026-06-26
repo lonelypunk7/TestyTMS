@@ -2,18 +2,22 @@
 
 HTTP-прокси для TestY Test Management System. Превращает REST-запросы в MCP JSON-RPC вызовы к TestY API.
 
-## Что это
-
-Сервис-прослойка между HTTP-клиентами (браузеры, curl, Postman, CI/CD) и Testy TMS через протокол MCP. Позволяет работать с TestY через familiar HTTP-эндпоинты без необходимости разбираться в JSON-RPC.
-
-**Архитектура:**
+## Архитектура
 
 ```
 HTTP Client          MCP HTTP Server        MCP Process        TestY API
      |                        |                     |                |
   REST/JSON  ─────────────►  aiohttp :8765  ─stdin/stdout──►  testy_mcp.py  ─────►  testy.megapolis-it.pro
-     ◄─────────────────────   proxy loop          JSON-RPC        stdlib+httpx
+     ◄─────────────────────   proxy loop          JSON-RPC 2.0   stdlib+httpx
 ```
+
+Сервис состоит из трёх компонентов:
+
+| Файл | Роль |
+|------|------|
+| `mcp_http_server.py` | HTTP-сервер на aiohttp, проксирует HTTP-запросы → MCP JSON-RPC |
+| `testy_mcp.py` | Настоящий MCP Server (JSON-RPC 2.0), работает как subprocess |
+| `call_tool.py` | CLI-хелпер для ручных вызовов через stdin |
 
 ## Требования
 
@@ -24,7 +28,7 @@ HTTP Client          MCP HTTP Server        MCP Process        TestY API
 
 ## Установка
 
-### 1. Копировать `.env`
+### 1. Скопировать `.env`
 
 ```bash
 cp .env.example .env
@@ -34,9 +38,11 @@ cp .env.example .env
 
 ```ini
 TESTY_URL=https://testy.megapolis-it.pro
-TESTY_LOGIN=your_login
-TESTY_PASSWORD=your_password
+TESTY_LOGIN=leonidgalockin
+TESTY_PASSWORD=ihS|4#Ba
 ```
+
+> **Важно:** `TESTY_PASSWORD` должен быть в кавычках, если содержит `#` — он ломает dotenv без кавычек.
 
 ### 2. Установить зависимости
 
@@ -107,7 +113,7 @@ DELETE /suites/45    → delete_suite
 GET /health
 ```
 
-## Карта эндпоинтов
+### Карта эндпоинтов
 
 | HTTP Path              | MCP Tool          | Описание              |
 |------------------------|-------------------|-----------------------|
@@ -137,7 +143,78 @@ GET /health
 | `/search`              | `search_cases`    | Поиск по кейсам       |
 | `/health`              | —                 | Health check          |
 
-## Примеры использования
+## MCP Протокол (JSON-RPC 2.0)
+
+`testy_mcp.py` — настоящий MCP Server, реализующий полный протокол.
+
+### initialize handshake
+
+```json
+// Client → Server
+{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-17"}}
+
+// Server → Client
+{"jsonrpc":"2.0","id":1,"result":{
+  "protocolVersion":"2024-11-17",
+  "capabilities":{
+    "tools":{"listChanged":false}
+  },
+  "serverInfo":{"name":"testy-mcp","version":"2.0.0"}
+}}
+```
+
+### tools/list
+
+```json
+// Client → Server
+{"jsonrpc":"2.0","method":"tools/list","id":2}
+
+// Server → Client
+{"jsonrpc":"2.0","id":2,"result":{"tools":[
+  {"name":"get_projects","description":"List all projects",...},
+  {"name":"get_cases","description":"List test cases",...},
+  ...
+]}}
+```
+
+### tools/call
+
+```json
+// Client → Server
+{"jsonrpc":"2.0","method":"tools/call","id":3,
+ "params":{"name":"get_projects","arguments":{"page":1,"page_size":10}}}
+
+// Server → Client
+{"jsonrpc":"2.0","id":3,"result":{"results":[...],"total":42}}
+```
+
+### Error codes
+
+| Code | Meaning |
+|------|---------|
+| `-32600` | Invalid Request |
+| `-32601` | Method Not Found |
+| `-32602` | Invalid Params |
+| `-32603` | Internal Error |
+| `-32001` | Unknown Tool |
+| `-32002` | Auth Required |
+| `-32003` | API Error |
+
+### Capabilities
+
+- `tools` — поддержка `tools/list` и `tools/call`
+- `notifications/initialized` — notification после handshake
+- `notifications/progress` — прогресс-уведомления
+
+### Как работает
+
+1. `mcp_http_server.py` запускает `testy_mcp.py` как subprocess
+2. `testy_mcp.py` сразу шлёт greeting: `{"jsonrpc":"2.0","id":1,"result":{...}}`
+3. HTTP-запрос → конвертируется в JSON-RPC 2.0 → пишется в stdin subprocess
+4. Subprocess читает из stdin, вызывает TestY API → пишет ответ в stdout
+5. HTTP-сервер читает stdout → возвращает клиенту
+
+### Примеры использования
 
 ### Получить проекты
 
@@ -187,8 +264,8 @@ curl -X DELETE http://localhost:8765/suites/45
 
 ```
 .
-├── mcp_http_server.py    # Основной HTTP-сервер (aiohttp + proxy)
-├── testy_mcp.py          # MCP JSON-RPC сервер (TestY client)
+├── mcp_http_server.py    # HTTP-сервер (aiohttp + MCP proxy)
+├── testy_mcp.py          # MCP JSON-RPC 2.0 сервер (TestY client)
 ├── call_tool.py          # CLI-хелпер для ручных вызовов
 ├── .env.example          # Шаблон переменных окружения
 ├── .env                  # Конфиденциальные данные (не коммитится)

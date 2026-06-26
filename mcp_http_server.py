@@ -2,7 +2,8 @@
 """
 TestY MCP HTTP Server.
 Launches testy_mcp.py as subprocess, proxies HTTP → MCP JSON-RPC over stdin pipe.
-Uses only stdlib + aiohttp.
+
+Uses only stdlib + aiohttp. No external MCP SDK needed.
 """
 import asyncio
 import json
@@ -17,21 +18,24 @@ class MCPProxy:
 
     async def start(self):
         self.proc = await asyncio.create_subprocess_exec(
-            "python3", "testy_mcp.py",
+            sys.executable, "testy_mcp.py",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd="/Users/leonid/Projects/Megapolis-IT/testy",
+            cwd="/Users/leonid/Projects/TestyTMS",
         )
-        greeting = await self.proc.stdout.readline()
-        data = json.loads(greeting)
+        # Read the greeting (first line from subprocess)
+        greeting_line = await self.proc.stdout.readline()
+        data = json.loads(greeting_line)
         self._init_done = True
         return data
 
     async def call(self, tool_name, args):
         if not self._init_done:
             await self.start()
+        # Send tool call as MCP JSON-RPC 2.0
         msg = json.dumps({
+            "jsonrpc": "2.0",
             "method": "tools/call",
             "id": 1,
             "params": {"name": tool_name, "arguments": args}
@@ -40,6 +44,7 @@ class MCPProxy:
         await self.proc.stdin.drain()
         line = await self.proc.stdout.readline()
         resp = json.loads(line)
+        # MCP response format: {"jsonrpc": "2.0", "id": 1, "result": ...}
         return resp.get("result", resp)
 
     async def route(self, resource, args, method="GET"):
@@ -60,7 +65,7 @@ class MCPProxy:
         if method == "GET":
             tool = mapping.get(resource, resource)
         elif method == "POST":
-            tool = f"get_{resource}"
+            tool = f"create_{resource}"
         elif method == "PUT":
             tool = f"update_{resource}"
         elif method == "DELETE":
