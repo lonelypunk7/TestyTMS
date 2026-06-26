@@ -299,7 +299,13 @@ async def handle_tool_call(name: str, args: dict, client: TestYClient) -> dict:
         ]
         if name in get_by_id:
             id_key = name.replace("get_", "").rstrip("s")
+            # API uses plural resource names in URLs
+            _plural_map = {"suite": "suites", "case": "cases", "test": "tests", "project": "projects", "testplan": "testplans", "result": "results", "user": "users", "group": "groups", "label": "labels", "status": "statuses", "attachment": "attachments", "comment": "comments"}
+            id_key_url = _plural_map.get(id_key, id_key)
             id_val = args.get(id_key) or args.get(f"{id_key}_id")
+            if not id_val:
+                return {"error": f"Missing {id_key} ID"}
+            return await client.get(f"/api/v2/{id_key_url}/{id_val}/")
             if not id_val:
                 return {"error": f"Missing {id_key} ID"}
             return await client.get(f"/api/v2/{id_key}/{id_val}/")

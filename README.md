@@ -38,8 +38,8 @@ cp .env.example .env
 
 ```ini
 TESTY_URL=https://testy.megapolis-it.pro
-TESTY_LOGIN=leonidgalockin
-TESTY_PASSWORD=
+TESTY_LOGIN=Ваш логин
+TESTY_PASSWORD=Ваш пароль
 ```
 
 > **Важно:** `TESTY_PASSWORD` должен быть в кавычках, если содержит `#` — он ломает dotenv без кавычек.

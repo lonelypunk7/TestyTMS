@@ -24,7 +24,6 @@ class MCPProxy:
             stderr=asyncio.subprocess.PIPE,
             cwd="/Users/leonid/Projects/TestyTMS",
         )
-        # Read the greeting (first line from subprocess)
         greeting_line = await self.proc.stdout.readline()
         data = json.loads(greeting_line)
         self._init_done = True
@@ -33,7 +32,6 @@ class MCPProxy:
     async def call(self, tool_name, args):
         if not self._init_done:
             await self.start()
-        # Send tool call as MCP JSON-RPC 2.0
         msg = json.dumps({
             "jsonrpc": "2.0",
             "method": "tools/call",
@@ -44,37 +42,21 @@ class MCPProxy:
         await self.proc.stdin.drain()
         line = await self.proc.stdout.readline()
         resp = json.loads(line)
-        # MCP response format: {"jsonrpc": "2.0", "id": 1, "result": ...}
         return resp.get("result", resp)
 
-    async def route(self, resource, args, method="GET"):
-        mapping = {
-            "projects": "get_projects", "project": "get_project",
-            "cases": "get_cases", "case": "get_case",
-            "tests": "get_tests", "test": "get_test",
-            "suites": "get_suites", "suite": "get_suite",
-            "testplans": "get_testplans", "testplan": "get_testplan",
-            "results": "get_results", "result": "get_result",
-            "users": "get_users", "user": "get_user",
-            "groups": "get_groups", "group": "get_group",
-            "labels": "get_labels", "label": "get_label",
-            "statuses": "get_statuses", "status": "get_status",
-            "attachments": "get_attachments", "attachment": "get_attachment",
-            "comments": "get_comments", "notifications": "get_notifications",
-        }
-        if method == "GET":
-            tool = mapping.get(resource, resource)
-        elif method == "POST":
-            tool = f"create_{resource}"
-        elif method == "PUT":
-            tool = f"update_{resource}"
-        elif method == "DELETE":
-            tool = f"delete_{resource}"
-
-        return await self.call(tool, args)
+    async def route(self, tool_name, args):
+        return await self.call(tool_name, args)
 
 
 proxy = MCPProxy()
+
+# Singular resource names for ID-based operations
+SINGULAR = {
+    "projects": "project", "cases": "case", "tests": "test",
+    "suites": "suite", "testplans": "testplan", "results": "result",
+    "users": "user", "groups": "group", "labels": "label",
+    "statuses": "status", "attachments": "attachment", "comments": "comment",
+}
 
 
 async def handle(request):
@@ -85,30 +67,51 @@ async def handle(request):
 
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(request.path)
-        args = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        query_args = {k: v[0] for k, v in parse_qs(parsed.query).items()}
 
         parts = path.split("/")
         resource = parts[0]
-        resource_id = parts[1] if len(parts) > 1 else None
+        has_id = len(parts) >= 2 and parts[1] and not parts[1].startswith("?")
 
-        if request.method == "GET":
-            if resource_id:
-                args[resource] = resource_id
-            result = await proxy.route(resource, args, "GET")
-        elif request.method == "POST":
+        method = request.method
+        args = dict(query_args)
+
+        if method == "GET":
+            if has_id:
+                singular = SINGULAR.get(resource, resource.rstrip("s"))
+                args[singular] = parts[1]
+            if has_id:
+                singular = SINGULAR.get(resource, resource.rstrip("s"))
+                tool = f"get_{singular}"
+            else:
+                tool = f"get_{resource}"
+            result = await proxy.route(tool, args)
+
+        elif method == "POST":
             body = await request.json()
-            if resource_id:
-                body[resource] = resource_id
-            result = await proxy.route(resource, body, "POST")
-        elif request.method == "PUT":
+            if has_id:
+                singular = SINGULAR.get(resource, resource.rstrip("s"))
+                body[singular] = parts[1]
+            singular = SINGULAR.get(resource, resource.rstrip("s"))
+            tool = f"create_{singular}"
+            result = await proxy.route(tool, body)
+
+        elif method == "PUT":
             body = await request.json()
-            if resource_id:
-                body[resource] = resource_id
-            result = await proxy.route(resource, body, "PUT")
-        elif request.method == "DELETE":
-            if resource_id:
-                args[resource] = resource_id
-            result = await proxy.route(resource, args, "DELETE")
+            if has_id:
+                singular = SINGULAR.get(resource, resource.rstrip("s"))
+                body[singular] = parts[1]
+            singular = SINGULAR.get(resource, resource.rstrip("s"))
+            tool = f"update_{singular}"
+            result = await proxy.route(tool, body)
+
+        elif method == "DELETE":
+            if has_id:
+                singular = SINGULAR.get(resource, resource.rstrip("s"))
+                args[singular] = parts[1]
+            singular = SINGULAR.get(resource, resource.rstrip("s"))
+            tool = f"delete_{singular}"
+            result = await proxy.route(tool, args)
         else:
             return web.json_response({"error": "Method not allowed"}, status=405)
 

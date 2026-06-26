@@ -10,8 +10,8 @@
 - **Auth header:** `Authorization: Bearer <access_token>`
 
 ## Креды
-- **Login:** `leonidgalockin`
-- **Password:** `ihS|4#Ba`
+- **Login:** `Ваш логин`
+- **Password:** `Ваш пароль`
 - **Хранятся в:** `.env` (`TESTY_LOGIN`, `TESTY_PASSWORD`)
 
 ## Структура API
